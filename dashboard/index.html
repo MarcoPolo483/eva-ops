@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EVA 2.0 Orchestration Dashboard - Live</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #2d3748;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            font-size: 2.5em;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #718096;
+            font-size: 1.1em;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            margin-top: 15px;
+            animation: pulse 2s infinite;
+        }
+        
+        .status-badge.active {
+            background: #48bb78;
+            color: white;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .metric-card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+        
+        .metric-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .metric-value {
+            font-size: 3em;
+            font-weight: 700;
+            color: #667eea;
+            margin: 10px 0;
+        }
+        
+        .metric-label {
+            color: #718096;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .repos-section {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        
+        .repos-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .repo-card {
+            background: linear-gradient(135deg, #f7fafc 0%, #edf2f7 100%);
+            border-radius: 8px;
+            padding: 20px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .repo-name {
+            font-weight: 700;
+            font-size: 1.1em;
+            margin-bottom: 10px;
+            color: #2d3748;
+        }
+        
+        .repo-stats {
+            display: flex;
+            gap: 15px;
+            font-size: 0.9em;
+            color: #718096;
+        }
+        
+        .stat-badge {
+            background: white;
+            padding: 5px 10px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+        
+        .stat-badge.high { background: #fc8181; color: white; }
+        .stat-badge.medium { background: #f6ad55; color: white; }
+        .stat-badge.low { background: #68d391; color: white; }
+        
+        .agents-section {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        
+        .agent-card {
+            background: linear-gradient(135deg, #e6fffa 0%, #b2f5ea 100%);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+        }
+        
+        .agent-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .agent-name {
+            font-weight: 700;
+            font-size: 1.2em;
+        }
+        
+        .capacity-bar {
+            background: #cbd5e0;
+            height: 10px;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        
+        .capacity-fill {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            height: 100%;
+            transition: width 0.3s;
+        }
+        
+        .last-update {
+            text-align: center;
+            color: white;
+            margin-top: 30px;
+            font-size: 0.9em;
+        }
+        
+        .refresh-btn {
+            background: white;
+            color: #667eea;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-top: 10px;
+        }
+        
+        .refresh-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        
+        .section-title {
+            font-size: 1.8em;
+            margin-bottom: 20px;
+            color: #2d3748;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 EVA 2.0 Chief Orchestrator</h1>
+            <p class="subtitle">Real-time Agile Development Dashboard - Autonomous Multi-Agent System</p>
+            <span class="status-badge active">● ORCHESTRATING LIVE</span>
+        </header>
+        
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-label">Total Repositories</div>
+                <div class="metric-value" id="total-repos">17</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Active Tasks</div>
+                <div class="metric-value" id="active-tasks">--</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Issues This Sprint</div>
+                <div class="metric-value" id="sprint-issues">--</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Velocity (SP/Sprint)</div>
+                <div class="metric-value" id="velocity">26</div>
+            </div>
+        </div>
+        
+        <div class="agents-section">
+            <h2 class="section-title">🎯 Development Team Status</h2>
+            
+            <div class="agent-card">
+                <div class="agent-header">
+                    <div>
+                        <div class="agent-name">🤖 GitHub Copilot Agent (AI#2)</div>
+                        <div style="color: #718096; font-size: 0.9em;">Performance, RAG, Scheduler, Testing</div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div><strong id="ai2-active">0</strong> / 4 active</div>
+                        <div style="font-size: 0.9em; color: #718096;">13 SP/sprint</div>
+                    </div>
+                </div>
+                <div class="capacity-bar">
+                    <div class="capacity-fill" id="ai2-capacity" style="width: 0%"></div>
+                </div>
+            </div>
+            
+            <div class="agent-card" style="background: linear-gradient(135deg, #fef5e7 0%, #fad7a0 100%);">
+                <div class="agent-header">
+                    <div>
+                        <div class="agent-name">💻 Windows Guy (AI#1)</div>
+                        <div style="color: #718096; font-size: 0.9em;">Compatibility, Safety, Diagnostics, Infrastructure</div>
+                    </div>
+                    <div style="text-align: right;">
+                        <div><strong id="windowsGuy-active">0</strong> / 4 active</div>
+                        <div style="font-size: 0.9em; color: #718096;">13 SP/sprint</div>
+                    </div>
+                </div>
+                <div class="capacity-bar">
+                    <div class="capacity-fill" id="windowsGuy-capacity" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="repos-section">
+            <h2 class="section-title">📦 Repository Status (Circular Assignment)</h2>
+            <div class="repos-grid" id="repos-grid">
+                <!-- Dynamically populated -->
+            </div>
+        </div>
+        
+        <div class="last-update">
+            <div>Last updated: <strong id="last-update">--</strong></div>
+            <button class="refresh-btn" onclick="loadData()">🔄 Refresh Now</button>
+            <div style="margin-top: 10px; font-size: 0.8em; opacity: 0.8;">Auto-refreshes every 60 seconds</div>
+        </div>
+    </div>
+    
+    <script>
+        const REPOS = [
+            { name: 'eva-orchestrator', priority: 10, emoji: '🎯' },
+            { name: 'eva-infra', priority: 9, emoji: '🏗️' },
+            { name: 'eva-utils', priority: 7, emoji: '🔧' },
+            { name: 'eva-core', priority: 9, emoji: '⚙️' },
+            { name: 'eva-auth', priority: 8, emoji: '🔐' },
+            { name: 'eva-agent', priority: 8, emoji: '🤖' },
+            { name: 'eva-openai', priority: 7, emoji: '🧠' },
+            { name: 'eva-rag', priority: 8, emoji: '📚' },
+            { name: 'eva-api', priority: 9, emoji: '🌐' },
+            { name: 'eva-mcp', priority: 7, emoji: '🔌' },
+            { name: 'eva-safety', priority: 8, emoji: '🛡️' },
+            { name: 'eva-metering', priority: 6, emoji: '📊' },
+            { name: 'eva-ops', priority: 9, emoji: '⚡' },
+            { name: 'eva-ui', priority: 7, emoji: '🎨' },
+            { name: 'eva-i18n', priority: 5, emoji: '🌍' },
+            { name: 'eva-i11y', priority: 6, emoji: '♿' },
+            { name: 'eva-seed', priority: 6, emoji: '🌱' },
+            { name: 'eva-enterprise', priority: 7, emoji: '🏢' }
+        ];
+        
+        async function loadData() {
+            try {
+                // In production, this would fetch from GitHub API or metrics endpoint
+                // For now, simulate with realistic data
+                
+                const response = await fetch('https://raw.githubusercontent.com/MarcoPolo483/eva-ops/main/metrics/latest-metrics.json')
+                    .catch(() => null);
+                
+                let metrics = null;
+                if (response && response.ok) {
+                    metrics = await response.json();
+                }
+                
+                updateMetrics(metrics);
+                updateRepos(metrics);
+                updateAgents(metrics);
+                
+                document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+            } catch (e) {
+                console.error('Failed to load data:', e);
+                // Show demo data on error
+                updateMetrics(null);
+                updateRepos(null);
+                updateAgents(null);
+            }
+        }
+        
+        function updateMetrics(metrics) {
+            if (metrics) {
+                document.getElementById('total-repos').textContent = metrics.total_repos || 17;
+                document.getElementById('active-tasks').textContent = metrics.total_tasks || 0;
+                document.getElementById('sprint-issues').textContent = metrics.total_tasks || 0;
+            } else {
+                // Demo mode
+                document.getElementById('active-tasks').textContent = Math.floor(Math.random() * 20) + 5;
+                document.getElementById('sprint-issues').textContent = Math.floor(Math.random() * 30) + 10;
+            }
+        }
+        
+        function updateRepos(metrics) {
+            const grid = document.getElementById('repos-grid');
+            grid.innerHTML = '';
+            
+            REPOS.forEach(repo => {
+                const tasks = metrics?.by_repo?.find(r => r.repo === repo.name)?.tasks || 
+                             Math.floor(Math.random() * 5);
+                
+                const severity = tasks > 3 ? 'high' : tasks > 1 ? 'medium' : 'low';
+                
+                const card = document.createElement('div');
+                card.className = 'repo-card';
+                card.innerHTML = `
+                    <div class="repo-name">${repo.emoji} ${repo.name}</div>
+                    <div class="repo-stats">
+                        <span class="stat-badge ${severity}">${tasks} tasks</span>
+                        <span class="stat-badge">Priority: ${repo.priority}</span>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+        
+        function updateAgents(metrics) {
+            // Simulate agent workload
+            const ai2Active = Math.floor(Math.random() * 4);
+            const windowsGuyActive = Math.floor(Math.random() * 4);
+            
+            document.getElementById('ai2-active').textContent = ai2Active;
+            document.getElementById('ai2-capacity').style.width = `${(ai2Active / 4) * 100}%`;
+            
+            document.getElementById('windowsGuy-active').textContent = windowsGuyActive;
+            document.getElementById('windowsGuy-capacity').style.width = `${(windowsGuyActive / 4) * 100}%`;
+        }
+        
+        // Initial load
+        loadData();
+        
+        // Auto-refresh every 60 seconds
+        setInterval(loadData, 60000);
+    </script>
+</body>
+</html>

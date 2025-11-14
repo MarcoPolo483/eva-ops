@@ -1,0 +1,34 @@
+{
+  "report_metadata": {
+    "generated_date": "2025-11-14T04:30:00Z",
+    "generated_by": "Windows Guy",
+    "iteration": 1,
+    "type": "dry-run",
+    "tool_version": "0.1.0"
+  },
+  "summary": {
+    "tests_passing": 0,
+    "tests_total": 1,
+    "pass_rate_percent": 0.0
+  },
+  "failing_tests": [
+    {
+      "file": "src/__tests__/dryRunTest1.test.ts",
+      "name": "dry run 1 > passes",
+      "status": "missing"
+    }
+  ],
+  "action_recommendations": [
+    {
+      "issue_template": "dry-run-iteration",
+      "iteration": 1,
+      "severity": "low",
+      "summary": "Create placeholder passing test file dryRunTest1.test.ts",
+      "suggested_files": ["src/__tests__/dryRunTest1.test.ts"],
+      "acceptance": {
+        "tests_should_pass": ["dryRunTest1.test.ts"],
+        "forbidden_strings": ["TODO", "console.log("]
+      }
+    }
+  ]
+}

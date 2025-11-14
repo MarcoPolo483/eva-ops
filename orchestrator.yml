@@ -1,19 +1,172 @@
+# ════════════════════════════════════════════════════════════════════════════
+# EVA 2.0 ORCHESTRATOR CONFIGURATION
+# Role: Chief Orchestrator / Agile Scrum Master
+# Purpose: Continuously assign work across 17 repos in circular pattern
+# ════════════════════════════════════════════════════════════════════════════
+
+meta:
+  orchestrator_role: "chief"
+  orchestrator_mode: "agile_continuous"
+  description: |
+    This orchestrator acts as the Chief/Scrum Master for EVA 2.0.
+    It continuously scans all repositories in circular order, assigns work
+    to agents based on capacity, priorities, and velocity, then monitors
+    progress via GitHub Issues and Projects for real-time dashboards.
+
+# ────────────────────────────────────────────────────────────────────────────
+# MULTI-REPOSITORY CONFIGURATION
+# ────────────────────────────────────────────────────────────────────────────
+repositories:
+  # Circular assignment order (1→2→3...→17→1)
+  - name: eva-orchestrator
+    priority: 10  # Highest - orchestration infrastructure
+    scan_interval_minutes: 15
+    
+  - name: eva-infra
+    priority: 9   # Infrastructure & Terraform
+    scan_interval_minutes: 30
+    
+  - name: eva-utils
+    priority: 7
+    scan_interval_minutes: 60
+    
+  - name: eva-core
+    priority: 9
+    scan_interval_minutes: 30
+    
+  - name: eva-auth
+    priority: 8
+    scan_interval_minutes: 45
+    
+  - name: eva-agent
+    priority: 8
+    scan_interval_minutes: 45
+    
+  - name: eva-openai
+    priority: 7
+    scan_interval_minutes: 60
+    
+  - name: eva-rag
+    priority: 8
+    scan_interval_minutes: 45
+    
+  - name: eva-api
+    priority: 9
+    scan_interval_minutes: 30
+    
+  - name: eva-mcp
+    priority: 7
+    scan_interval_minutes: 60
+    
+  - name: eva-safety
+    priority: 8
+    scan_interval_minutes: 45
+    
+  - name: eva-metering
+    priority: 6
+    scan_interval_minutes: 90
+    
+  - name: eva-ops
+    priority: 9   # Current repo - observability
+    scan_interval_minutes: 30
+    
+  - name: eva-ui
+    priority: 7
+    scan_interval_minutes: 60
+    
+  - name: eva-i18n
+    priority: 5
+    scan_interval_minutes: 120
+    
+  - name: eva-i11y
+    priority: 6
+    scan_interval_minutes: 90
+    
+  - name: eva-seed
+    priority: 6
+    scan_interval_minutes: 90
+    
+  - name: eva-enterprise
+    priority: 7
+    scan_interval_minutes: 60
+
+# ────────────────────────────────────────────────────────────────────────────
+# AGENT CONFIGURATION (Development Team)
+# ────────────────────────────────────────────────────────────────────────────
 agents:
   - id: ai2
-    roles: [performance, rag, scheduler]
+    name: "GitHub Copilot Agent (AI#2)"
+    roles: [performance, rag, scheduler, testing, refactoring]
     max_active_issues: 4
+    velocity_per_sprint: 13  # Story points per 2-week sprint
+    specialties:
+      - Node.js/TypeScript
+      - RAG pipelines
+      - Batch scheduling
+      - Performance optimization
+    
   - id: windowsGuy
-    roles: [compatibility, safety, diagnostics]
+    name: "Windows Guy (AI#1)"
+    roles: [compatibility, safety, diagnostics, infrastructure, monitoring]
     max_active_issues: 4
+    velocity_per_sprint: 13
+    specialties:
+      - Windows compatibility
+      - Safety gates
+      - Diagnostics & observability
+      - Infrastructure as Code
 
+# ────────────────────────────────────────────────────────────────────────────
+# OWNERSHIP & RESPONSIBILITY MATRIX
+# ────────────────────────────────────────────────────────────────────────────
 ownership:
   scheduler: [ai2]
   compatibility-layer: [windowsGuy]
   rag-pipeline: [ai2, windowsGuy]
+  safety-gates: [windowsGuy]
+  batch-processing: [ai2]
+  observability: [windowsGuy]
+  infrastructure: [windowsGuy]
+  performance: [ai2]
+  testing: [ai2, windowsGuy]
 
+# ────────────────────────────────────────────────────────────────────────────
+# AGILE / SPRINT CONFIGURATION
+# ────────────────────────────────────────────────────────────────────────────
+agile:
+  sprint_duration_days: 14
+  sprint_start_day: "Monday"
+  
+  story_points:
+    trivial: 1      # Simple fixes, typos
+    small: 2        # Single file changes
+    medium: 3       # Multiple files, 1 feature
+    large: 5        # Complex feature or refactor
+    epic: 8         # Multi-day effort
+    
+  board_columns:
+    - backlog
+    - ready
+    - in_progress
+    - review
+    - testing
+    - done
+    
+  ceremonies:
+    daily_standup: false  # Async via dashboards
+    sprint_planning: true  # Auto-generated every sprint
+    sprint_review: true    # Report generation
+    retrospective: true    # Metrics analysis
+
+# ────────────────────────────────────────────────────────────────────────────
+# SLA & PRIORITIZATION
+# ────────────────────────────────────────────────────────────────────────────
 sla:
   blocked_on_human_hours: 24
   stale_issue_hours: 72
+  critical_response_minutes: 30
+  high_response_hours: 4
+  medium_response_hours: 24
 
 prioritization:
   weights:
@@ -22,12 +175,53 @@ prioritization:
     security: 6
     compatibility: 5
     lint_errors: 2
+    technical_debt: 3
+    feature_request: 2
+    
+  severity_multipliers:
+    critical: 3
+    high: 2
+    medium: 1
+    low: 0.5
 
+# ────────────────────────────────────────────────────────────────────────────
+# GITHUB INTEGRATION
+# ────────────────────────────────────────────────────────────────────────────
 issue_labels:
   autogenerated: ai2/autogen
   dry_run: dry-run
   blocked: blocked-on-human
   conflict: conflict-pending
-
+  sprint_ready: sprint-ready
+  needs_review: needs-review
+  
 branching:
   pattern: "issue/{number}-{slug}"
+  
+projects:
+  main_board: "EVA 2.0 Development Board"
+  enable_automation: true
+  
+# ────────────────────────────────────────────────────────────────────────────
+# CONTINUOUS ORCHESTRATION BEHAVIOR
+# ────────────────────────────────────────────────────────────────────────────
+orchestration:
+  mode: circular  # Scan repos in order, assign work, repeat
+  
+  circular_assignment:
+    enabled: true
+    loop_delay_minutes: 5  # Wait 5 min between full cycles
+    
+  work_distribution:
+    balance_by_velocity: true  # Assign based on agent velocity
+    respect_capacity: true     # Don't overload agents
+    prioritize_by_repo: true   # High-priority repos get work first
+    
+  monitoring:
+    generate_velocity_reports: true
+    track_burn_down: true
+    calculate_cycle_time: true
+    
+  conflict_resolution:
+    auto_merge_on_success: true
+    escalate_to_human_after_attempts: 2

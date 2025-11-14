@@ -1,0 +1,140 @@
+name: Continuous Multi-Repo Orchestration
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Chief Orchestrator - Continuous Agile Workflow
+# 
+# This workflow acts as the Scrum Master, continuously scanning all 17 EVA 2.0
+# repositories, assigning work to agents, and maintaining real-time dashboards.
+# ═══════════════════════════════════════════════════════════════════════════
+
+on:
+  schedule:
+    # Run every hour (Agile continuous flow)
+    - cron: '0 * * * *'
+  
+  workflow_dispatch:
+    inputs:
+      repo_filter:
+        description: 'Optional: scan specific repo only'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run mode (no issues created)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  issues: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  orchestrate:
+    name: "Chief Orchestrator - Multi-Repo Scan"
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout eva-ops (orchestrator repo)
+        uses: actions/checkout@v4
+        with:
+          path: eva-ops
+      
+      # Checkout all 17 repos for scanning
+      - name: Checkout all EVA 2.0 repositories
+        run: |
+          mkdir -p /home/runner/work/eva-workspace
+          cd /home/runner/work/eva-workspace
+          
+          # Clone all repos (parallel would be faster but simpler sequential here)
+          repos=(
+            "eva-orchestrator"
+            "eva-infra"
+            "eva-utils"
+            "eva-core"
+            "eva-auth"
+            "eva-agent"
+            "eva-openai"
+            "eva-rag"
+            "eva-api"
+            "eva-mcp"
+            "eva-safety"
+            "eva-metering"
+            "eva-ops"
+            "eva-ui"
+            "eva-i18n"
+            "eva-i11y"
+            "eva-seed"
+            "eva-enterprise"
+          )
+          
+          for repo in "${repos[@]}"; do
+            echo "Cloning $repo..."
+            gh repo clone MarcoPolo483/$repo || echo "Failed to clone $repo (may not exist yet)"
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: eva-ops/package-lock.json
+      
+      - name: Install dependencies
+        run: |
+          cd eva-ops
+          npm ci
+      
+      - name: Run Chief Orchestrator Scan
+        run: |
+          cd eva-ops
+          
+          # Build command
+          CMD="node scripts/orchestrator-scan-all-repos.mjs"
+          
+          # Add repo filter if specified
+          if [ -n "${{ inputs.repo_filter }}" ]; then
+            CMD="$CMD --repo=${{ inputs.repo_filter }}"
+          fi
+          
+          # Add dry-run flag if enabled
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            CMD="$CMD --dry-run"
+          fi
+          
+          echo "Running: $CMD"
+          $CMD
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+      
+      - name: Upload metrics artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: orchestration-metrics-${{ github.run_number }}
+          path: eva-ops/metrics/*.json
+          retention-days: 90
+      
+      - name: Generate dashboard data
+        run: |
+          cd eva-ops
+          # Create latest-metrics.json for dashboard consumption
+          if [ -f metrics/*.json ]; then
+            cp $(ls -t metrics/*.json | head -1) metrics/latest-metrics.json
+          fi
+      
+      - name: Commit metrics to repo (for dashboard)
+        run: |
+          cd eva-ops
+          git config user.name "EVA Orchestrator Bot"
+          git config user.email "orchestrator@eva.local"
+          
+          if [ -f metrics/latest-metrics.json ]; then
+            git add metrics/latest-metrics.json
+            git diff --staged --quiet || git commit -m "chore: Update orchestration metrics [skip ci]"
+            git push
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
