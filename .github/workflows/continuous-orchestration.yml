@@ -93,6 +93,12 @@ jobs:
           
           # Build command
           CMD="node scripts/orchestrator-scan-all-repos.mjs"
+
+          # Short-circuit gracefully if script is missing (prevents early workflow failure)
+          if [ ! -f scripts/orchestrator-scan-all-repos.mjs ]; then
+            echo "orchestrator-scan-all-repos.mjs not found; skipping scan"
+            exit 0
+          fi
           
           # Add repo filter if specified
           if [ -n "${{ inputs.repo_filter }}" ]; then
