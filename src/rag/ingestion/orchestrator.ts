@@ -2,9 +2,10 @@
  * Minimal orchestrator (simple chain) useful for tests that import "./orchestrator.js"
  * If your test suite expects this file, keep it as a thin façade over the Extended orchestrator.
  */
+import type { BatchScheduler } from "../../scheduler/batchScheduler.js";
+
 import type { IngestionRequest, ISourceResolver, IChunker, IEmbedder, IVectorIndex, ISparseIndex, IManifestStore, IEvaluationRunner, ISafetyGate, IndexSnapshotStore } from "./types.js";
 import { RagIngestionOrchestratorExtended, type ExtendedOptions } from "./orchestrator-extended.js";
-import type { BatchScheduler } from "../../scheduler/batchScheduler.js";
 import { IngestionContextRegistry } from "./contextRegistry.js";
 
 export class RagIngestionOrchestrator extends RagIngestionOrchestratorExtended {

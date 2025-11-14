@@ -13,7 +13,7 @@ export class Scheduler {
   private tasks = new Map<string, Task>();
 
   // Accept optional logger for backward compatibility
-  constructor(_logger?: unknown) {}
+  constructor(_logger?: unknown) { }
 
   start(task: Task) {
     if (this.timers.has(task.id)) throw new Error("Task exists: " + task.id);

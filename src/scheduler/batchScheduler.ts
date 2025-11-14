@@ -9,6 +9,8 @@
 import type { Logger } from "../logging/logger.js";
 import type { LockManager } from "../locks/lockManager.js";
 import type { MeterRegistry } from "../core/registry.js";
+import { exponentialBackoff, jitter } from "../util/backoff.js";
+
 import {
   type BatchJobDefinition,
   type RuntimeJob,
@@ -19,7 +21,6 @@ import {
   type JobStatus
 } from "./batchTypes.js";
 import type { BatchSnapshotStore } from "./batchPersistence.js";
-import { exponentialBackoff, jitter } from "../util/backoff.js";
 
 type InternalOptions = Required<BatchSchedulerOptions> & { tickIntervalMs: number };
 
@@ -151,7 +152,7 @@ export class BatchScheduler {
   }
   async waitForIdle(timeoutMs = 3000): Promise<void> {
     const start = Date.now();
-    for (;;) {
+    for (; ;) {
       const snap = this.snapshot();
       if (!snap.running.length && !snap.queued.length && !snap.blocked.length) return;
       if (Date.now() - start > timeoutMs) return;

@@ -1,5 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import http from "http";
+
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+
 import { createLogger } from "../logging/logger.js";
 import { RingBufferSink } from "../logging/sinks.js";
 import { MeterRegistry } from "../core/registry.js";

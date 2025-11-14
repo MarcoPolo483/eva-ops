@@ -14,7 +14,7 @@ export class CircuitBreaker {
   private successes = 0;
   private nextTryAt = 0;
 
-  constructor(private opts: CircuitOptions = {}, private logger?: Logger) {}
+  constructor(private opts: CircuitOptions = {}, private logger?: Logger) { }
 
   async exec<T>(fn: () => Promise<T>): Promise<T> {
     const now = Date.now();
