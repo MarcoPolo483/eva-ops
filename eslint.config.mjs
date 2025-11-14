@@ -14,16 +14,30 @@ export default tseslint.config(
       parserOptions: {
         project: "./tsconfig.json",
         tsconfigRootDir: import.meta.dirname,
-        sourceType: "module"
-      }
+        sourceType: "module",
+      },
     },
     plugins: { import: importPlugin },
     rules: {
       "import/order": ["error", { "newlines-between": "always" }],
       "@typescript-eslint/consistent-type-imports": "error",
       "@typescript-eslint/no-floating-promises": "warn",
-      "no-console": "off"
-    }
+      "no-console": "off",
+    },
   },
-  prettier
+  {
+    files: ["**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: {
+        process: "readonly",
+        console: "readonly",
+      },
+    },
+    rules: {
+      "no-console": "off",
+    },
+  },
+  prettier,
 );
