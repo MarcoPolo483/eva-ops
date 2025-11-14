@@ -1,0 +1,45 @@
+name: Orchestrator • Report Ingest
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'reports/*.json'
+      - 'orchestrator.yml'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install (only if script needs deps)
+        run: |
+          if [ -f package.json ]; then npm ci; fi
+
+      - name: Run orchestrator ingest
+        run: node scripts/orchestrator-ingest.mjs
+
+      - name: Debug artifacts
+        if: always()
+        run: |
+          mkdir -p artifacts
+          cp -f reports/*.json artifacts/ || true
+          ls -R .
+        continue-on-error: true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingest-artifacts
+          path: artifacts

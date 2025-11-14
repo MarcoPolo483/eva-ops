@@ -1,0 +1,21 @@
+name: Orchestrator • Scheduled Scan
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Run orchestrator ingest (scheduled)
+        run: node scripts/orchestrator-ingest.mjs
