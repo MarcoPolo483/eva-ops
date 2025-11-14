@@ -14,7 +14,7 @@ export class Scheduler {
   private timer?: NodeJS.Timeout;
   private stopped = false;
 
-  constructor(private logger: Logger) {}
+  constructor(private logger: Logger) { }
 
   every(name: string, interval: string, fn: TaskDef["fn"]) {
     if (this.tasks.has(name)) throw new Error("Task exists: " + name);

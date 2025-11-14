@@ -1,6 +1,9 @@
 import type { Logger } from "../logging/logger.js";
 import type { LockManager } from "../locks/lockManager.js";
-import {
+import { exponentialBackoff, jitter } from "../util/backoff.js";
+import type { MeterRegistry } from "../core/registry.js";
+
+import type {
   BatchJobDefinition,
   RuntimeJob,
   BatchSchedulerOptions,
@@ -10,9 +13,7 @@ import {
   JobStatus
 } from "./batchTypes.js";
 import type { BatchSnapshotStore } from "./batchPersistence.js";
-import { exponentialBackoff, jitter } from "../util/backoff.js";
 // If eva-metering copied locally, adjust import path if different.
-import type { MeterRegistry } from "../core/registry.js";
 
 export class BatchScheduler {
   private jobs = new Map<string, RuntimeJob>();

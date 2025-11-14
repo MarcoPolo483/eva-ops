@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+
 import { createLogger } from "../logging/logger.js";
 import { RingBufferSink } from "../logging/sinks.js";
 import { BatchScheduler } from "../scheduler/batchScheduler.js";

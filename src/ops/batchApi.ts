@@ -1,8 +1,7 @@
 /**
- * Minimal handlers for batch scheduler control.
- * Plug into any HTTP layer (express-like or custom).
+ * Batch scheduler control & listing helpers.
+ * Extended with explicit requeue action (supports priority overrides).
  */
-
 import { BatchScheduler } from "../scheduler/batchScheduler.js";
 
 export function listJobs(scheduler: BatchScheduler) {
@@ -23,7 +22,9 @@ export function listJobs(scheduler: BatchScheduler) {
     queued: snap.queued.map(summarize),
     blocked: snap.blocked.map(summarize),
     held: snap.held.map(summarize),
-    failed: snap.failed.map(summarize)
+    failed: snap.failed.map(summarize),
+    cancelled: snap.cancelled.map(summarize),
+    succeeded: snap.succeeded.map(summarize)
   };
 }
 
@@ -34,11 +35,20 @@ export function jobAction(
   overrides?: Record<string, unknown>
 ) {
   switch (action) {
-    case "hold": scheduler.hold(id); break;
-    case "release": scheduler.release(id); break;
-    case "cancel": scheduler.cancel(id); break;
-    case "requeue": scheduler.requeue(id, overrides as any); break;
-    default: throw new Error("Unsupported action");
+    case "hold":
+      scheduler.hold(id);
+      break;
+    case "release":
+      scheduler.release(id);
+      break;
+    case "cancel":
+      scheduler.cancel(id);
+      break;
+    case "requeue":
+      scheduler.requeue(id, overrides as any);
+      break;
+    default:
+      throw new Error("Unsupported action: " + action);
   }
   return { ok: true };
 }
