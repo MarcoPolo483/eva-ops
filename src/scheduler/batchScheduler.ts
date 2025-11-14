@@ -1,9 +1,6 @@
 import type { Logger } from "../logging/logger.js";
 import type { LockManager } from "../locks/lockManager.js";
-import { exponentialBackoff, jitter } from "../util/backoff.js";
-import type { MeterRegistry } from "../core/registry.js";
-
-import type {
+import {
   BatchJobDefinition,
   RuntimeJob,
   BatchSchedulerOptions,
@@ -12,21 +9,23 @@ import type {
   ScheduleResult,
   JobStatus
 } from "./batchTypes.js";
-import type { BatchSnapshotStore } from "./batchPersistence.js";
-// If eva-metering copied locally, adjust import path if different.
+import type { BatchSnapshotStore } from "./batchPersistence.ts";
+import { exponentialBackoff, jitter } from "../util/backoff.js";
+import type { MeterRegistry } from "../core/registry.js";
+
+type InternalOptions = Required<BatchSchedulerOptions> & { tickIntervalMs: number };
 
 export class BatchScheduler {
   private jobs = new Map<string, RuntimeJob>();
   private running = new Set<string>();
   private hooks: JobHooks = {};
-  private opts: Required<BatchSchedulerOptions>;
+  private opts: InternalOptions;
   private interval?: NodeJS.Timeout;
   private agingTimer?: NodeJS.Timeout;
   private stopping = false;
   private store?: BatchSnapshotStore;
   private meter?: MeterRegistry;
 
-  // Metrics placeholders (define if meter provided)
   private mStarted?: any;
   private mFailed?: any;
   private mSucceeded?: any;
@@ -34,7 +33,7 @@ export class BatchScheduler {
 
   constructor(
     private logger: Logger,
-    opts: BatchSchedulerOptions = {},
+    opts: BatchSchedulerOptions & { tickIntervalMs?: number } = {},
     private locks?: LockManager,
     store?: BatchSnapshotStore,
     meter?: MeterRegistry
@@ -46,7 +45,8 @@ export class BatchScheduler {
       agingIntervalMs: opts.agingIntervalMs ?? 30_000,
       defaultAttemptTimeoutMs: opts.defaultAttemptTimeoutMs ?? 5 * 60_000,
       clock: opts.clock ?? (() => Date.now()),
-      priorityComparator: opts.priorityComparator ?? defaultComparator
+      priorityComparator: opts.priorityComparator ?? defaultComparator,
+      tickIntervalMs: opts.tickIntervalMs ?? 200 // smaller default for snappier tests
     };
     this.store = store;
     this.meter = meter;
@@ -56,46 +56,12 @@ export class BatchScheduler {
     this.startAgingLoop();
   }
 
-  private initMetrics() {
-    this.mStarted = this.meter!.counter("batch_jobs_started_total", "Batch jobs started", ["class"]);
-    this.mFailed = this.meter!.counter("batch_jobs_failed_total", "Batch jobs failed", ["class"]);
-    this.mSucceeded = this.meter!.counter("batch_jobs_succeeded_total", "Batch jobs succeeded", ["class"]);
-    this.mDuration = this.meter!.histogram("batch_job_duration_seconds", "Batch job run duration seconds", ["class"]);
-  }
-
-  private async recover() {
-    if (!this.store) return;
-    const existing = await this.store.load();
-    for (const j of existing) {
-      // Only requeue unfinished jobs
-      if (["queued", "running", "blocked", "held"].includes(j.status)) {
-        j.status = "queued"; // force queued state
-        j.nextEligibleAt = undefined;
-        this.jobs.set(j.def.id, j);
-      } else {
-        this.jobs.set(j.def.id, j); // keep terminal states for audit
-      }
-    }
-  }
-
-  setHooks(h: JobHooks) {
-    this.hooks = h;
-  }
-
-  async persist() {
-    if (!this.store) return;
-    await this.store.save(Array.from(this.jobs.values()));
-  }
+  setHooks(h: JobHooks) { this.hooks = h; }
 
   submit(def: BatchJobDefinition) {
     if (this.jobs.has(def.id)) throw new Error("Job id exists: " + def.id);
     const now = this.opts.clock();
-    const job: RuntimeJob = {
-      def: { ...def, createdAt: now },
-      status: "queued",
-      attempts: 0,
-      enqueueAt: now
-    };
+    const job: RuntimeJob = { def: { ...def, createdAt: now }, status: "queued", attempts: 0, enqueueAt: now };
     this.jobs.set(def.id, job);
     return job;
   }
@@ -104,14 +70,9 @@ export class BatchScheduler {
     const j = this.jobs.get(id);
     if (!j) throw new Error("Job not found");
     if (!["failed", "cancelled", "succeeded"].includes(j.status)) throw new Error("Can only requeue terminal job");
-    const newDef = { ...j.def, ...overrides, priority: overrides?.priority ?? j.def.priority };
+    const newDef = { ...j.def, ...overrides, id: j.def.id };
     const now = this.opts.clock();
-    const job: RuntimeJob = {
-      def: newDef,
-      status: "queued",
-      attempts: 0,
-      enqueueAt: now
-    };
+    const job: RuntimeJob = { def: newDef, status: "queued", attempts: 0, enqueueAt: now };
     this.jobs.set(newDef.id, job);
     return job;
   }
@@ -139,15 +100,7 @@ export class BatchScheduler {
 
   snapshot(): BatchSnapshot {
     const ts = this.opts.clock();
-    const buckets: Record<JobStatus, RuntimeJob[]> = {
-      queued: [],
-      held: [],
-      running: [],
-      succeeded: [],
-      failed: [],
-      cancelled: [],
-      blocked: []
-    };
+    const buckets: Record<JobStatus, RuntimeJob[]> = { queued: [], held: [], running: [], succeeded: [], failed: [], cancelled: [], blocked: [] };
     for (const j of this.jobs.values()) buckets[j.status].push(j);
     const perClass: Record<string, { running: number; queued: number; concurrencyLimit?: number }> = {};
     for (const j of this.jobs.values()) {
@@ -157,23 +110,32 @@ export class BatchScheduler {
       if (j.status === "queued") pc.queued++;
       perClass[cls] = pc;
     }
-    return {
-      timestamp: ts,
-      running: buckets.running,
-      queued: buckets.queued,
-      held: buckets.held,
-      blocked: buckets.blocked,
-      succeeded: buckets.succeeded,
-      failed: buckets.failed,
-      cancelled: buckets.cancelled,
-      perClass
-    };
+    return { timestamp: ts, running: buckets.running, queued: buckets.queued, held: buckets.held, blocked: buckets.blocked, succeeded: buckets.succeeded, failed: buckets.failed, cancelled: buckets.cancelled, perClass };
   }
 
   stop() {
     this.stopping = true;
     if (this.interval) clearInterval(this.interval);
     if (this.agingTimer) clearInterval(this.agingTimer);
+  }
+
+  private initMetrics() {
+    this.mStarted = this.meter!.counter("batch_jobs_started_total", "Batch jobs started", ["class"]);
+    this.mFailed = this.meter!.counter("batch_jobs_failed_total", "Batch jobs failed", ["class"]);
+    this.mSucceeded = this.meter!.counter("batch_jobs_succeeded_total", "Batch jobs succeeded", ["class"]);
+    this.mDuration = this.meter!.histogram("batch_job_duration_seconds", "Batch job run duration seconds", ["class"]);
+  }
+
+  private async recover() {
+    if (!this.store) return;
+    const existing = await this.store.load();
+    for (const j of existing) {
+      if (["queued", "running", "blocked", "held"].includes(j.status)) {
+        j.status = "queued";
+        j.nextEligibleAt = undefined;
+      }
+      this.jobs.set(j.def.id, j);
+    }
   }
 
   private startLoop() {
@@ -185,7 +147,7 @@ export class BatchScheduler {
       } catch (e: any) {
         this.logger.error("batch.schedule.error", { error: e?.message });
       }
-    }, 500);
+    }, this.opts.tickIntervalMs);
   }
 
   private startAgingLoop() {
@@ -205,16 +167,30 @@ export class BatchScheduler {
     }, this.opts.agingIntervalMs);
   }
 
+  async persist() { if (this.store) await this.store.save(Array.from(this.jobs.values())); }
+
+  // Test helpers: force a single cycle and drain until idle
+  tickOnce(): ScheduleResult {
+    return this.scheduleCycle();
+  }
+
+  async drainUntilIdle(timeoutMs = 2000): Promise<void> {
+    const start = Date.now();
+    for (;;) {
+      this.scheduleCycle();
+      if (this.running.size === 0 && this.snapshot().queued.length === 0 && this.snapshot().blocked.length === 0) return;
+      if (Date.now() - start > timeoutMs) return;
+      await new Promise((r) => setTimeout(r, Math.min(20, this.opts.tickIntervalMs)));
+    }
+  }
+
   private scheduleCycle(): ScheduleResult {
     const ready: RuntimeJob[] = [];
     const now = this.opts.clock();
 
     for (const j of this.jobs.values()) {
       if (j.status === "queued") {
-        if (!this.isEligible(j, now)) {
-          this.transition(j, "blocked");
-          continue;
-        }
+        if (!this.isEligible(j, now)) { this.transition(j, "blocked"); continue; }
         ready.push(j);
       } else if (j.status === "blocked") {
         if (this.isEligible(j, now)) this.transition(j, "queued");
@@ -228,20 +204,11 @@ export class BatchScheduler {
     const blocked: string[] = [];
 
     for (const job of ready) {
-      if (this.running.size >= this.opts.maxConcurrent) {
-        waiting.push(job.def.id);
-        break;
-      }
-      if (!this.classHasCapacity(job.def.class ?? "default")) {
-        waiting.push(job.def.id);
-        continue;
-      }
+      if (this.running.size >= this.opts.maxConcurrent) { waiting.push(job.def.id); break; }
+      if (!this.classHasCapacity(job.def.class ?? "default")) { waiting.push(job.def.id); continue; }
       if (job.def.resourceTags && this.locks) {
         const conflict = job.def.resourceTags.find((tag) => this.isResourceLocked(tag));
-        if (conflict) {
-          waiting.push(job.def.id);
-          continue;
-        }
+        if (conflict) { waiting.push(job.def.id); continue; }
       }
       this.startJob(job);
       started.push(job.def.id);
@@ -252,7 +219,7 @@ export class BatchScheduler {
   }
 
   private isEligible(job: RuntimeJob, now: number): boolean {
-    if (job.def.dependencies && job.def.dependencies.length) {
+    if (job.def.dependencies?.length) {
       for (const dep of job.def.dependencies) {
         const d = this.jobs.get(dep);
         if (!d || d.status !== "succeeded") return false;
@@ -287,32 +254,22 @@ export class BatchScheduler {
     job.startedAt = this.opts.clock();
     this.running.add(job.def.id);
     this.hooks.onStart?.(job);
-    if (this.mStarted) this.mStarted.inc({ class: job.def.class ?? "default" });
+    this.mStarted?.inc({ class: job.def.class ?? "default" });
 
     const attemptTimeout = job.def.attemptTimeoutMs ?? this.opts.defaultAttemptTimeoutMs;
-    const timer = setTimeout(() => {
-      if (job.status === "running") this.failJob(job, "attempt timeout");
-    }, attemptTimeout);
+    const timer = setTimeout(() => { if (job.status === "running") this.failJob(job, "attempt timeout"); }, attemptTimeout);
 
     Promise.resolve()
       .then(() => this.execute(job))
-      .then(() => {
-        if (job.status === "running") this.succeedJob(job);
-      })
-      .catch((e) => {
-        if (job.status === "running") this.failJob(job, e?.message || "error");
-      })
+      .then(() => { if (job.status === "running") this.succeedJob(job); })
+      .catch((e) => { if (job.status === "running") this.failJob(job, e?.message || "error"); })
       .finally(() => clearTimeout(timer));
   }
 
-  private async execute(job: RuntimeJob): Promise<void> {
-    // If payload includes an execution function (domain-specific injection)
-    const fn = (job.def.payload as any)?.run;
-    if (typeof fn === "function") {
-      await fn(job);
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 10)); // default short work
+  // Hook for domain-specific execution
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  protected async execute(job: RuntimeJob): Promise<void> {
+    await new Promise((r) => setTimeout(r, 10));
   }
 
   private succeedJob(job: RuntimeJob) {
@@ -334,8 +291,8 @@ export class BatchScheduler {
     const maxRetries = job.def.maxRetries ?? 0;
     if (job.attempts <= maxRetries) {
       const base = job.def.retryBackoffMs ?? 1000;
-      const backoffMs = exponentialBackoff(base, 2, 60_000)(job.attempts); // exponential
-      const jittered = backoffMs - (backoffMs * 0.5) + jitter(backoffMs * 0.5); // half jitter
+      const backoffMs = exponentialBackoff(base, 2, 60_000)(job.attempts);
+      const jittered = backoffMs - (backoffMs * 0.5) + jitter(backoffMs * 0.5);
       job.nextEligibleAt = this.opts.clock() + jittered;
       this.transition(job, "queued");
       this.hooks.onFailure?.(job);

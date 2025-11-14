@@ -1,3 +1,5 @@
+import type { IngestionContext } from "./types.js";
+
 export interface RollbackStep {
   phase: string;
   action: () => Promise<void>;
@@ -31,4 +33,13 @@ export class RollbackPlan {
   clear(): void {
     this.steps = [];
   }
+}
+
+// Helper functions for rollback logic
+export function shouldSkipIndex(ctx: IngestionContext): boolean {
+  return ctx.phaseResults.some(r => r.phase === "embed" && r.error !== undefined);
+}
+
+export function recordRollbackMetric(ctx: IngestionContext): boolean {
+  return ctx.phaseResults.some(r => r.phase === "rollback");
 }

@@ -1,15 +1,7 @@
-import {
-  IngestionManifest,
-  ManifestDocumentEntry,
-  IManifestStore,
-  TenantId,
-  LoadedDocument,
-  Chunk
-} from "./types.js";
-import { stableHash } from "./utils/hash.js";
+import type { IManifestStore, IngestionManifest, LoadedDocument, TenantId, Chunk } from "./types.js";
 
 export class InMemoryManifestStore implements IManifestStore {
-  private latest = new Map<string, IngestionManifest>();
+  private latest = new Map<TenantId, IngestionManifest>();
   async getLatest(tenant: TenantId): Promise<IngestionManifest | undefined> {
     return this.latest.get(tenant);
   }
@@ -25,43 +17,26 @@ export function buildManifest(
   chunks: Chunk[],
   version: number
 ): IngestionManifest {
-  const chunkMap = new Map<string, Chunk[]>();
+  const byDoc = new Map<string, string[]>();
   for (const ch of chunks) {
-    const arr = chunkMap.get(ch.docId) ?? [];
-    arr.push(ch);
-    chunkMap.set(ch.docId, arr);
-  }
-  const entries: ManifestDocumentEntry[] = [];
-  for (const doc of docs) {
-    const docChunks = chunkMap.get(doc.docId) ?? [];
-    entries.push({
-      docId: doc.docId,
-      hash: doc.hash,
-      chunkHashes: docChunks.map((c) => c.hash),
-      updatedAt: new Date().toISOString()
-    });
+    const arr = byDoc.get(ch.docId) ?? [];
+    arr.push(ch.hash);
+    byDoc.set(ch.docId, arr);
   }
   return {
     ingestionId,
     tenant,
     createdAt: new Date().toISOString(),
-    docs: entries,
-    version
+    version,
+    docs: docs.map((d) => ({ docId: d.docId, hash: d.hash, chunkHashes: byDoc.get(d.docId) ?? [], updatedAt: new Date().toISOString() }))
   };
 }
 
-export function diffManifest(
-  previous: IngestionManifest | undefined,
-  currentDocs: LoadedDocument[]
-): { changed: LoadedDocument[]; unchanged: LoadedDocument[] } {
+export function diffManifest(previous: IngestionManifest | undefined, currentDocs: LoadedDocument[]): { changed: LoadedDocument[]; unchanged: LoadedDocument[] } {
   if (!previous) return { changed: currentDocs, unchanged: [] };
-  const prevMap = new Map(previous.docs.map((d) => [d.docId, d.hash]));
+  const prev = new Map(previous.docs.map((d) => [d.docId, d.hash]));
   const changed: LoadedDocument[] = [];
   const unchanged: LoadedDocument[] = [];
-  for (const doc of currentDocs) {
-    const oldHash = prevMap.get(doc.docId);
-    if (!oldHash || oldHash !== doc.hash) changed.push(doc);
-    else unchanged.push(doc);
-  }
+  for (const d of currentDocs) (prev.get(d.docId) === d.hash ? unchanged : changed).push(d);
   return { changed, unchanged };
 }

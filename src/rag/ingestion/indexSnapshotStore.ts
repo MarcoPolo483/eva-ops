@@ -1,4 +1,4 @@
-import { IndexSnapshot, IndexSnapshotStore, TenantId } from "./types.js";
+import type { IndexSnapshot, IndexSnapshotStore, TenantId } from "./types.js";
 
 export class InMemoryIndexSnapshotStore implements IndexSnapshotStore {
   private latest = new Map<TenantId, IndexSnapshot>();

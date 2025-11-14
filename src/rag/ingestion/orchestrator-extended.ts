@@ -1,46 +1,33 @@
-/**
- * Extended orchestrator integrating policies, safety enhancement, tracing, incremental intelligence,
- * advanced evaluation, and multi-phase rollback logic. This file replaces or supplements the prior orchestrator.
- */
 import {
-  IngestionRequest,
-  IngestionContext,
-  ISourceResolver,
-  IChunker,
-  IEmbedder,
-  IVectorIndex,
-  ISparseIndex,
-  IManifestStore,
-  IEvaluationRunner,
-  ISafetyGate,
-  IndexSnapshotStore,
-  IngestionPhase
+  type IngestionRequest,
+  type IngestionContext,
+  type ISourceResolver,
+  type IChunker,
+  type IEmbedder,
+  type IVectorIndex,
+  type ISparseIndex,
+  type IManifestStore,
+  type IEvaluationRunner,
+  type ISafetyGate,
+  type IndexSnapshotStore,
+  type IngestionPhase
 } from "./types.js";
 import { diffManifest, buildManifest } from "./manifestStore.js";
 import { rollbackIndex } from "./rollback.js";
 import { computeEmbeddingCost } from "./costMeter.js";
-import { BatchScheduler } from "../../scheduler/batchScheduler.js";
-import type { MeterRegistry } from "../../core/registry.js";
 import { stableHash } from "./utils/hash.js";
-import { PolicyEngine, GovernancePolicies } from "./policies.js";
-import { rankChangedDocs, adaptivePriority } from "./incrementalIntelligence.js";
-import { shouldSkipIndex, recordRollbackMetric } from "./rollbackPlan.js";
-import { Tracer, Span } from "./tracing.js";
+import type { MeterRegistry } from "../../core/registry.js";
 import { IngestionContextRegistry } from "./contextRegistry.js";
-import { runRetrievalEvaluation, IRetriever } from "./retrievalEvaluation.js";
 
 export type ExtendedOptions = {
   pricing?: { promptUSDPer1K: number; completionUSDPer1K: number };
   metrics?: MeterRegistry;
-  policies?: GovernancePolicies;
-  tracer?: Tracer;
-  retriever?: IRetriever;
   agingThresholdMs?: number;
 };
 
 export class RagIngestionOrchestratorExtended {
   constructor(
-    private scheduler: BatchScheduler,
+    private scheduler: import("../../scheduler/batchScheduler.js").BatchScheduler,
     private resolver: ISourceResolver,
     private chunker: IChunker,
     private embedder: IEmbedder,
@@ -53,242 +40,99 @@ export class RagIngestionOrchestratorExtended {
     private registry: IngestionContextRegistry,
     private opts: ExtendedOptions = {}
   ) {
-    this.policyEngine = new PolicyEngine(opts.policies || {});
     if (this.opts.metrics) this.initMetrics(this.opts.metrics);
   }
 
-  private policyEngine: PolicyEngine;
   private mPhaseDur?: any;
   private mDocs?: any;
   private mChunks?: any;
   private mCost?: any;
-  private mRollback?: any;
-  private mSkippedDocs?: any;
-  private mEvalPrecision?: any;
-  private mEvalRecall?: any;
-  private mEvalMRR?: any;
-  private mQueryLatency?: any;
 
   private initMetrics(meter: MeterRegistry) {
-    this.mPhaseDur = meter.histogram("rag_ingestion_phase_duration_seconds", "Phase duration seconds", ["phase", "tenant"]);
-    this.mDocs = meter.counter("rag_ingestion_docs_total", "Documents processed", ["tenant", "status"]);
-    this.mChunks = meter.counter("rag_ingestion_chunks_total", "Chunks processed", ["tenant", "status"]);
-    this.mCost = meter.counter("rag_ingestion_embeddings_cost_usd_total", "Embedding cost USD", ["tenant"]);
-    this.mRollback = meter.counter("rag_ingestion_rollback_total", "Rollbacks", ["tenant"]);
-    this.mSkippedDocs = meter.counter("rag_incremental_skipped_docs_total", "Skipped unchanged docs", ["tenant"]);
-    this.mEvalPrecision = meter.gauge("rag_ingestion_eval_precision_at_k", "Precision@K", ["tenant", "k"]);
-    this.mEvalRecall = meter.gauge("rag_ingestion_eval_recall_at_k", "Recall@K", ["tenant", "k"]);
-    this.mEvalMRR = meter.gauge("rag_ingestion_eval_mrr", "MRR", ["tenant"]);
-    this.mQueryLatency = meter.histogram("rag_eval_query_latency_seconds", "Eval query latency sec", ["tenant"]);
+    this.mPhaseDur = meter.histogram("rag_ingestion_phase_duration_seconds", "Phase sec", ["phase", "tenant"]);
+    this.mDocs = meter.counter("rag_ingestion_docs_total", "Docs", ["tenant", "status"]);
+    this.mChunks = meter.counter("rag_ingestion_chunks_total", "Chunks", ["tenant", "status"]);
+    this.mCost = meter.counter("rag_ingestion_embeddings_cost_usd_total", "USD", ["tenant"]);
   }
 
   ingest(request: IngestionRequest): string {
     const ingestionId = request.ingestionId ?? "ing-" + stableHash(Date.now().toString()).slice(0, 8);
-    const ctx: IngestionContext = {
-      request: { ...request, ingestionId },
-      phaseResults: [],
-      startTime: Date.now()
-    };
+    const ctx: IngestionContext = { request: { ...request, ingestionId }, phaseResults: [], startTime: Date.now() };
     this.registry.register(ctx);
 
-    // Governance pre-submit checks
-    const activeIngestions = this.scheduler.snapshot().running.filter(j => j.def.class === "rag").length;
-    const docByteSum = request.inputs.reduce((acc, r) => {
-      if (r.type === "text") return acc + Buffer.byteLength(r.content);
-      return acc;
-    }, 0);
-    const preEval = this.policyEngine.evaluatePreSubmit(request.tenant, activeIngestions, request.inputs.length, docByteSum);
-    if (!preEval.ok) {
-      ctx.phaseResults.push({
-        phase: "load",
-        tenant: request.tenant,
-        startTime: Date.now(),
-        endTime: Date.now(),
-        error: preEval.reason
-      });
-      return ingestionId; // Mark as failed early
+    const base = request.priority ?? 5;
+    this.scheduler.submit({ id: ingestionId + "-load", class: "rag", priority: base, payload: { run: async () => this.runPhase(ctx, "load", () => this.loadPhase(ctx)) } });
+    this.scheduler.submit({ id: ingestionId + "-chunk", class: "rag", priority: base - 1 as any, dependencies: [ingestionId + "-load"], payload: { run: async () => this.runPhase(ctx, "chunk", () => this.chunkPhase(ctx)) } });
+    this.scheduler.submit({ id: ingestionId + "-embed", class: "rag", priority: base - 2 as any, dependencies: [ingestionId + "-chunk"], payload: { run: async () => this.runPhase(ctx, "embed", () => this.embedPhase(ctx)) } });
+    this.scheduler.submit({ id: ingestionId + "-index", class: "rag", priority: base - 3 as any, dependencies: [ingestionId + "-embed"], payload: { run: async () => this.runPhase(ctx, "index", () => this.indexPhase(ctx)) } });
+    this.scheduler.submit({ id: ingestionId + "-manifest", class: "rag", priority: base - 4 as any, dependencies: [ingestionId + "-index"], payload: { run: async () => this.runPhase(ctx, "manifest", () => this.manifestPhase(ctx)) } });
+    if (request.evaluationQueries?.length && this.evalRunner) {
+      this.scheduler.submit({ id: ingestionId + "-evaluate", class: "rag", priority: base - 5 as any, dependencies: [ingestionId + "-manifest"], payload: { run: async () => this.runPhase(ctx, "evaluate", () => this.evaluatePhase(ctx)) } });
     }
-
-    const basePriority = request.priority ?? 5;
-    const makeSpan = (phase: string): Span | undefined =>
-      this.opts.tracer?.startSpan(`ingestion.${phase}`, ctx.request.ingestionId, undefined, { tenant: request.tenant });
-
-    this.scheduler.submit({
-      id: ingestionId + "-load",
-      priority: basePriority,
-      class: "rag",
-      payload: {
-        run: async () => await this.runPhase(ctx, "load", () => this.loadPhase(ctx), makeSpan("load"))
-      }
-    });
-
-    this.scheduler.submit({
-      id: ingestionId + "-chunk",
-      priority: basePriority - 1 as any,
-      class: "rag",
-      dependencies: [ingestionId + "-load"],
-      payload: {
-        run: async () => await this.runPhase(ctx, "chunk", () => this.chunkPhase(ctx), makeSpan("chunk"))
-      }
-    });
-
-    this.scheduler.submit({
-      id: ingestionId + "-embed",
-      priority: basePriority - 2 as any,
-      class: "rag",
-      dependencies: [ingestionId + "-chunk"],
-      payload: {
-        run: async () => await this.runPhase(ctx, "embed", () => this.embedPhase(ctx), makeSpan("embed"))
-      }
-    });
-
-    this.scheduler.submit({
-      id: ingestionId + "-index",
-      priority: basePriority - 3 as any,
-      class: "rag",
-      dependencies: [ingestionId + "-embed"],
-      payload: {
-        run: async () => await this.runPhase(ctx, "index", () => this.indexPhase(ctx), makeSpan("index"))
-      }
-    });
-
-    this.scheduler.submit({
-      id: ingestionId + "-manifest",
-      priority: basePriority - 4 as any,
-      class: "rag",
-      dependencies: [ingestionId + "-index"],
-      payload: {
-        run: async () => await this.runPhase(ctx, "manifest", () => this.manifestPhase(ctx), makeSpan("manifest"))
-      }
-    });
-
-    if (request.evaluationQueries?.length && (this.evalRunner || this.opts.retriever)) {
-      this.scheduler.submit({
-        id: ingestionId + "-evaluate",
-        priority: basePriority - 5 as any,
-        class: "rag",
-        dependencies: [ingestionId + "-manifest"],
-        payload: {
-          run: async () => await this.runPhase(ctx, "evaluate", () => this.evaluatePhase(ctx), makeSpan("evaluate"))
-        }
-      });
-    }
-
     this.scheduler.submit({
       id: ingestionId + "-complete",
-      priority: basePriority - 6 as any,
       class: "rag",
+      priority: base - 6 as any,
       dependencies: request.evaluationQueries?.length ? [ingestionId + "-evaluate"] : [ingestionId + "-manifest"],
-      payload: {
-        run: async () => await this.runPhase(ctx, "complete", async () => ({ ok: true }), makeSpan("complete"))
-      }
+      payload: { run: async () => this.runPhase(ctx, "complete", async () => ({ ok: true })) }
     });
 
     return ingestionId;
   }
 
-  private async runPhase<T>(ctx: IngestionContext, phase: IngestionPhase, fn: () => Promise<T>, span?: Span): Promise<void> {
+  private async runPhase<T>(ctx: IngestionContext, phase: IngestionPhase, fn: () => Promise<T>) {
     const start = Date.now();
     try {
-      // Adaptive priority example (not altering scheduler mid-run, just recorded)
-      const waited = Date.now() - ctx.startTime;
-      const agingThreshold = this.opts.agingThresholdMs ?? 10_000;
-      const originalPriority = ctx.request.priority ?? 5;
-      const maybeRaised = adaptivePriority(originalPriority, waited, agingThreshold);
       const data = await fn();
-      const pr = { phase, tenant: ctx.request.tenant, startTime: start, endTime: Date.now(), data, raisedPriority: maybeRaised !== originalPriority };
-      ctx.phaseResults.push(pr);
-      if (this.mPhaseDur) this.mPhaseDur.observe({ phase, tenant: ctx.request.tenant }, (pr.endTime - pr.startTime) / 1000);
-      if (span) {
-        span.attrs = { ...(span.attrs || {}), raisedPriority: pr.raisedPriority };
-        this.opts.tracer?.endSpan(span);
-      }
+      const rec = { phase, tenant: ctx.request.tenant, startTime: start, endTime: Date.now(), data };
+      ctx.phaseResults.push(rec);
+      this.mPhaseDur?.observe({ phase, tenant: ctx.request.tenant }, (rec.endTime - rec.startTime) / 1000);
     } catch (e: any) {
-      const pr = { phase, tenant: ctx.request.tenant, startTime: start, endTime: Date.now(), error: e?.message };
-      ctx.phaseResults.push(pr);
+      const rec = { phase, tenant: ctx.request.tenant, startTime: start, endTime: Date.now(), error: e?.message || String(e) };
+      ctx.phaseResults.push(rec);
+      this.mPhaseDur?.observe({ phase, tenant: ctx.request.tenant }, (rec.endTime - rec.startTime) / 1000);
       if (phase === "index") {
         await rollbackIndex(ctx.request.tenant, this.vectorIndex, this.sparseIndex, this.snapshotStore);
-        ctx.phaseResults.push({
-          phase: "rollback",
-          tenant: ctx.request.tenant,
-          startTime: Date.now(),
-          endTime: Date.now(),
-          data: { reason: pr.error }
-        });
-        if (this.mRollback) this.mRollback.inc({ tenant: ctx.request.tenant }, 1);
-      }
-      if (this.mPhaseDur) this.mPhaseDur.observe({ phase, tenant: ctx.request.tenant }, (pr.endTime - pr.startTime) / 1000);
-      if (span) {
-        span.error = pr.error;
-        this.opts.tracer?.endSpan(span, pr.error);
+        ctx.phaseResults.push({ phase: "rollback", tenant: ctx.request.tenant, startTime: Date.now(), endTime: Date.now(), data: { reason: rec.error } });
       }
     }
   }
 
   private async loadPhase(ctx: IngestionContext) {
     const docs = await this.resolver.resolve(ctx.request.inputs, ctx.request.tenant);
-    // Safety gate
     if (ctx.request.safetyEnabled) {
       const gate = await this.safetyGate.check(docs);
-      const blockedEval = this.policyEngine.evaluateBlockedRatio(gate.blocked.length, docs.length);
-      if (!blockedEval.ok) {
-        ctx.phaseResults.push({
-          phase: "rollback",
-          tenant: ctx.request.tenant,
-          startTime: Date.now(),
-          endTime: Date.now(),
-          data: { reason: "blocked-ratio-abort" }
-        });
-        return { docCount: 0, aborted: true };
-      }
       ctx.docs = gate.allowed;
-      if (gate.blocked.length && this.mDocs) this.mDocs.inc({ tenant: ctx.request.tenant, status: "blocked" }, gate.blocked.length);
+      if (gate.blocked.length) this.mDocs?.inc({ tenant: ctx.request.tenant, status: "blocked" }, gate.blocked.length);
     } else {
       ctx.docs = docs;
     }
-    if (this.mDocs) this.mDocs.inc({ tenant: ctx.request.tenant, status: "loaded" }, ctx.docs.length);
+    this.mDocs?.inc({ tenant: ctx.request.tenant, status: "loaded" }, ctx.docs.length);
     return { docCount: ctx.docs.length };
   }
 
   private async chunkPhase(ctx: IngestionContext) {
     if (!ctx.docs) throw new Error("No docs loaded");
-    const prevManifest = await this.manifestStore.getLatest(ctx.request.tenant);
-    const { changed, unchanged } = ctx.request.forceFull ? { changed: ctx.docs, unchanged: [] } : diffManifest(prevManifest, ctx.docs);
-    const ranked = rankChangedDocs(changed, unchanged);
-    const chunks = await this.chunker.chunk(ranked, ctx.request.tenant);
-    ctx.chunks = chunks;
-    ctx.skippedDocs = unchanged.map(d => d.docId);
-    if (this.mChunks) {
-      this.mChunks.inc({ tenant: ctx.request.tenant, status: "chunked" }, chunks.length);
-      if (unchanged.length) {
-        this.mChunks.inc({ tenant: ctx.request.tenant, status: "skipped" }, unchanged.length);
-        this.mSkippedDocs.inc({ tenant: ctx.request.tenant }, unchanged.length);
-      }
-    }
-    // Enforce chunkCountCap if policy set
-    if (this.opts.policies?.chunkCountCap && chunks.length > this.opts.policies.chunkCountCap) {
-      throw new Error("Chunk count exceeds cap");
-    }
-    return { chunkCount: chunks.length, skippedDocs: ctx.skippedDocs };
+    const prev = await this.manifestStore.getLatest(ctx.request.tenant);
+    const { changed, unchanged } = ctx.request.forceFull ? { changed: ctx.docs, unchanged: [] } : diffManifest(prev, ctx.docs);
+    ctx.chunks = await this.chunker.chunk(changed, ctx.request.tenant);
+    ctx.skippedDocs = unchanged.map((d) => d.docId);
+    this.mChunks?.inc({ tenant: ctx.request.tenant, status: "chunked" }, ctx.chunks.length);
+    if (ctx.skippedDocs.length) this.mChunks?.inc({ tenant: ctx.request.tenant, status: "skipped" }, ctx.skippedDocs.length);
+    return { chunkCount: ctx.chunks.length, skippedDocs: ctx.skippedDocs };
   }
 
   private async embedPhase(ctx: IngestionContext) {
     if (!ctx.chunks) throw new Error("No chunks");
-    const embedded = await this.embedder.embed(ctx.chunks, ctx.request.tenant);
-    ctx.embedded = embedded;
+    ctx.embedded = await this.embedder.embed(ctx.chunks, ctx.request.tenant);
     if (this.opts.pricing && this.mCost) {
-      const cost = computeEmbeddingCost(embedded, this.opts.pricing);
+      const cost = computeEmbeddingCost(ctx.embedded, this.opts.pricing);
       this.mCost.inc({ tenant: ctx.request.tenant }, cost.usd);
-      const costEval = this.policyEngine.evaluateCost(cost.usd);
-      if (!costEval.ok) throw new Error(costEval.reason);
     }
-    return { embeddedCount: embedded.length };
+    return { embeddedCount: ctx.embedded.length };
   }
 
   private async indexPhase(ctx: IngestionContext) {
-    if (shouldSkipIndex(ctx)) {
-      return { skipped: true };
-    }
     if (!ctx.embedded) throw new Error("No embeddings");
     if (ctx.skippedDocs?.length) await this.vectorIndex.removeByDocIds(ctx.skippedDocs);
     await this.vectorIndex.upsert(ctx.embedded);
@@ -299,9 +143,9 @@ export class RagIngestionOrchestratorExtended {
   }
 
   private async manifestPhase(ctx: IngestionContext) {
-    if (!ctx.docs || !ctx.chunks) throw new Error("Missing data for manifest");
-    const previous = await this.manifestStore.getLatest(ctx.request.tenant);
-    const version = (previous?.version ?? 0) + 1;
+    if (!ctx.docs || !ctx.chunks) throw new Error("Missing data");
+    const prev = await this.manifestStore.getLatest(ctx.request.tenant);
+    const version = (prev?.version ?? 0) + 1;
     const manifest = buildManifest(ctx.request.ingestionId!, ctx.request.tenant, ctx.docs, ctx.chunks, version);
     ctx.manifest = manifest;
     await this.manifestStore.save(manifest);
@@ -309,31 +153,9 @@ export class RagIngestionOrchestratorExtended {
   }
 
   private async evaluatePhase(ctx: IngestionContext) {
-    const queries = ctx.request.evaluationQueries;
-    if (!queries || !queries.length) return { skipped: true };
-    if (this.evalRunner) {
-      const result = await this.evalRunner.run(queries, ctx.request.tenant);
-      ctx.evalResults = result;
-      if (this.mEvalMRR) this.mEvalMRR.set({ tenant: ctx.request.tenant }, result.mrr);
-      for (const [k, v] of Object.entries(result.precisionAtK)) this.mEvalPrecision.set({ tenant: ctx.request.tenant, k }, v);
-      for (const [k, v] of Object.entries(result.recallAtK)) this.mEvalRecall.set({ tenant: ctx.request.tenant, k }, v);
-      return result;
-    }
-    if (this.opts.retriever) {
-      const detailed = await runRetrievalEvaluation(this.opts.retriever, queries, ctx.request.tenant);
-      ctx.evalResults = {
-        precisionAtK: detailed.aggregate.precisionAtK,
-        recallAtK: detailed.aggregate.recallAtK,
-        mrr: detailed.aggregate.mrr
-      };
-      if (this.mEvalMRR) this.mEvalMRR.set({ tenant: ctx.request.tenant }, detailed.aggregate.mrr);
-      for (const [k, v] of Object.entries(detailed.aggregate.precisionAtK)) this.mEvalPrecision.set({ tenant: ctx.request.tenant, k }, v);
-      for (const [k, v] of Object.entries(detailed.aggregate.recallAtK)) this.mEvalRecall.set({ tenant: ctx.request.tenant, k }, v);
-      detailed.perQuery.forEach(pq => {
-        if (this.mQueryLatency) this.mQueryLatency.observe({ tenant: ctx.request.tenant }, pq.latencyMs / 1000);
-      });
-      return detailed.aggregate;
-    }
-    return { skipped: true };
+    if (!this.evalRunner || !ctx.request.evaluationQueries?.length) return { skipped: true };
+    const result = await this.evalRunner.run(ctx.request.evaluationQueries, ctx.request.tenant);
+    ctx.evalResults = result;
+    return result;
   }
 }

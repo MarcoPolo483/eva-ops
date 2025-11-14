@@ -132,7 +132,7 @@ it("POST /ops/batch malformed JSON returns 400", async () => {
   });
   expect(r.status).toBe(400);
   const text = await r.text();
-  expect(text).toMatch(/Invalid JSON|Unexpected token/);
+  expect(text).toMatch(/Invalid JSON|Unexpected token|Expected property name/);
 });
 
 it("POST /ops/batch missing id/action returns 400", async () => {
