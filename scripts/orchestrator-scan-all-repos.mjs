@@ -5,7 +5,6 @@
  * - Writes metrics/latest-metrics.json so workflow steps succeed
  * - Logs intent and exits 0 (no-op for now)
  */
-import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
@@ -30,7 +29,7 @@ async function writeMetrics(args) {
     status: "stub",
     dryRun: !!args.dryRun,
     repoFilter: args.repo ?? null,
-    note: "This is a stub output from orchestrator-scan-all-repos.mjs"
+    note: "This is a stub output from orchestrator-scan-all-repos.mjs",
   };
   const outPath = path.join(metricsDir, "latest-metrics.json");
   await fsp.writeFile(outPath, JSON.stringify(payload, null, 2), "utf8");
@@ -42,7 +41,7 @@ async function main() {
   console.info(
     `[orchestrator-stub] Running stub scan${args.repo ? ` for repo=${args.repo}` : ""}${
       args.dryRun ? " (dry-run)" : ""
-    }`
+    }`,
   );
   try {
     const out = await writeMetrics(args);
