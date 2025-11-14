@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2025-11-14T11:56:15.817Z",
+  "generatedAt": "2025-11-14T11:59:00.418Z",
   "status": "stub",
-  "dryRun": true,
-  "repoFilter": "test-repo",
+  "dryRun": false,
+  "repoFilter": null,
   "note": "This is a stub output from orchestrator-scan-all-repos.mjs"
 }
