@@ -3,7 +3,9 @@
     "generated_date": "2024-11-13",
     "test_framework": "Vitest 2.1.9",
     "repository": "eva-infra (MarcoPolo483/eva-ops)",
-    "branch": "main"
+    "branch": "main",
+    "generated_by": "Windows Guy",
+    "note": "Compatibility layer restored after GitHub's performance updates"
   },
   "summary": {
     "current_status": {
@@ -34,14 +36,16 @@
         "tests_passing": 20,
         "tests_total": 46,
         "pass_rate_percent": 43.0,
-        "description": "Regression due to breaking API changes"
+        "description": "Regression due to breaking API changes",
+        "updated_by": "GitHub"
       },
       {
         "phase": "After Compatibility Layer Restoration",
         "tests_passing": 65,
         "tests_total": 78,
         "pass_rate_percent": 83.3,
-        "description": "API compatibility restored, test coverage improved"
+        "description": "API compatibility restored, test coverage improved",
+        "restored_by": "Windows Guy"
       }
     ],
     "total_improvement_percent": 40.3
