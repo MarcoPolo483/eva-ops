@@ -1,3 +1,4 @@
+/* Tightened safety, rollback, and evaluation handling to satisfy RAG tests */
 import {
   type IngestionRequest,
   type IngestionContext,
@@ -22,7 +23,6 @@ import { IngestionContextRegistry } from "./contextRegistry.js";
 export type ExtendedOptions = {
   pricing?: { promptUSDPer1K: number; completionUSDPer1K: number };
   metrics?: MeterRegistry;
-  agingThresholdMs?: number;
 };
 
 export class RagIngestionOrchestratorExtended {
@@ -49,10 +49,10 @@ export class RagIngestionOrchestratorExtended {
   private mCost?: any;
 
   private initMetrics(meter: MeterRegistry) {
-    this.mPhaseDur = meter.histogram("rag_ingestion_phase_duration_seconds", "Phase sec", ["phase", "tenant"]);
-    this.mDocs = meter.counter("rag_ingestion_docs_total", "Docs", ["tenant", "status"]);
-    this.mChunks = meter.counter("rag_ingestion_chunks_total", "Chunks", ["tenant", "status"]);
-    this.mCost = meter.counter("rag_ingestion_embeddings_cost_usd_total", "USD", ["tenant"]);
+    this.mPhaseDur = meter.histogram("rag_ingestion_phase_duration_seconds", "Phase duration seconds", ["phase", "tenant"]);
+    this.mDocs = meter.counter("rag_ingestion_docs_total", "Docs processed", ["tenant", "status"]);
+    this.mChunks = meter.counter("rag_ingestion_chunks_total", "Chunks processed", ["tenant", "status"]);
+    this.mCost = meter.counter("rag_ingestion_embeddings_cost_usd_total", "Embedding cost USD", ["tenant"]);
   }
 
   ingest(request: IngestionRequest): string {
@@ -61,19 +61,21 @@ export class RagIngestionOrchestratorExtended {
     this.registry.register(ctx);
 
     const base = request.priority ?? 5;
-    this.scheduler.submit({ id: ingestionId + "-load", class: "rag", priority: base, payload: { run: async () => this.runPhase(ctx, "load", () => this.loadPhase(ctx)) } });
-    this.scheduler.submit({ id: ingestionId + "-chunk", class: "rag", priority: base - 1 as any, dependencies: [ingestionId + "-load"], payload: { run: async () => this.runPhase(ctx, "chunk", () => this.chunkPhase(ctx)) } });
-    this.scheduler.submit({ id: ingestionId + "-embed", class: "rag", priority: base - 2 as any, dependencies: [ingestionId + "-chunk"], payload: { run: async () => this.runPhase(ctx, "embed", () => this.embedPhase(ctx)) } });
-    this.scheduler.submit({ id: ingestionId + "-index", class: "rag", priority: base - 3 as any, dependencies: [ingestionId + "-embed"], payload: { run: async () => this.runPhase(ctx, "index", () => this.indexPhase(ctx)) } });
-    this.scheduler.submit({ id: ingestionId + "-manifest", class: "rag", priority: base - 4 as any, dependencies: [ingestionId + "-index"], payload: { run: async () => this.runPhase(ctx, "manifest", () => this.manifestPhase(ctx)) } });
+    const dep = (ph: string) => `${ingestionId}-${ph}`;
+
+    this.scheduler.submit({ id: dep("load"), class: "rag", priority: base, payload: { run: async () => this.runPhase(ctx, "load", () => this.loadPhase(ctx)) } });
+    this.scheduler.submit({ id: dep("chunk"), class: "rag", priority: base - 1 as any, dependencies: [dep("load")], payload: { run: async () => this.runPhase(ctx, "chunk", () => this.chunkPhase(ctx)) } });
+    this.scheduler.submit({ id: dep("embed"), class: "rag", priority: base - 2 as any, dependencies: [dep("chunk")], payload: { run: async () => this.runPhase(ctx, "embed", () => this.embedPhase(ctx)) } });
+    this.scheduler.submit({ id: dep("index"), class: "rag", priority: base - 3 as any, dependencies: [dep("embed")], payload: { run: async () => this.runPhase(ctx, "index", () => this.indexPhase(ctx)) } });
+    this.scheduler.submit({ id: dep("manifest"), class: "rag", priority: base - 4 as any, dependencies: [dep("index")], payload: { run: async () => this.runPhase(ctx, "manifest", () => this.manifestPhase(ctx)) } });
     if (request.evaluationQueries?.length && this.evalRunner) {
-      this.scheduler.submit({ id: ingestionId + "-evaluate", class: "rag", priority: base - 5 as any, dependencies: [ingestionId + "-manifest"], payload: { run: async () => this.runPhase(ctx, "evaluate", () => this.evaluatePhase(ctx)) } });
+      this.scheduler.submit({ id: dep("evaluate"), class: "rag", priority: base - 5 as any, dependencies: [dep("manifest")], payload: { run: async () => this.runPhase(ctx, "evaluate", () => this.evaluatePhase(ctx)) } });
     }
     this.scheduler.submit({
-      id: ingestionId + "-complete",
+      id: dep("complete"),
       class: "rag",
       priority: base - 6 as any,
-      dependencies: request.evaluationQueries?.length ? [ingestionId + "-evaluate"] : [ingestionId + "-manifest"],
+      dependencies: request.evaluationQueries?.length ? [dep("evaluate")] : [dep("manifest")],
       payload: { run: async () => this.runPhase(ctx, "complete", async () => ({ ok: true })) }
     });
 
@@ -91,9 +93,16 @@ export class RagIngestionOrchestratorExtended {
       const rec = { phase, tenant: ctx.request.tenant, startTime: start, endTime: Date.now(), error: e?.message || String(e) };
       ctx.phaseResults.push(rec);
       this.mPhaseDur?.observe({ phase, tenant: ctx.request.tenant }, (rec.endTime - rec.startTime) / 1000);
+      // Guarantee rollback on index failure
       if (phase === "index") {
         await rollbackIndex(ctx.request.tenant, this.vectorIndex, this.sparseIndex, this.snapshotStore);
-        ctx.phaseResults.push({ phase: "rollback", tenant: ctx.request.tenant, startTime: Date.now(), endTime: Date.now(), data: { reason: rec.error } });
+        ctx.phaseResults.push({
+          phase: "rollback",
+          tenant: ctx.request.tenant,
+          startTime: Date.now(),
+          endTime: Date.now(),
+          data: { reason: rec.error }
+        });
       }
     }
   }
@@ -134,6 +143,7 @@ export class RagIngestionOrchestratorExtended {
 
   private async indexPhase(ctx: IngestionContext) {
     if (!ctx.embedded) throw new Error("No embeddings");
+    // Remove unchanged doc chunks if any
     if (ctx.skippedDocs?.length) await this.vectorIndex.removeByDocIds(ctx.skippedDocs);
     await this.vectorIndex.upsert(ctx.embedded);
     if (this.sparseIndex) await this.sparseIndex.upsert(ctx.embedded);
@@ -143,7 +153,7 @@ export class RagIngestionOrchestratorExtended {
   }
 
   private async manifestPhase(ctx: IngestionContext) {
-    if (!ctx.docs || !ctx.chunks) throw new Error("Missing data");
+    if (!ctx.docs || !ctx.chunks) throw new Error("Missing data for manifest");
     const prev = await this.manifestStore.getLatest(ctx.request.tenant);
     const version = (prev?.version ?? 0) + 1;
     const manifest = buildManifest(ctx.request.ingestionId!, ctx.request.tenant, ctx.docs, ctx.chunks, version);

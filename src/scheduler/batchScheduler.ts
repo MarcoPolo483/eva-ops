@@ -1,17 +1,25 @@
+/* Focused reliability/timing fixes:
+ * - tickIntervalMs option (default 75ms)
+ * - immediate schedule on submit/requeue/release
+ * - waitForIdle(timeoutMs) for test synchronization
+ * - tickOnce() to force a cycle
+ * - proper time-window and dependency gating with blocked <-> queued transitions
+ * - safer hook ordering and duration metrics
+ */
 import type { Logger } from "../logging/logger.js";
 import type { LockManager } from "../locks/lockManager.js";
-import {
-  BatchJobDefinition,
-  RuntimeJob,
-  BatchSchedulerOptions,
-  JobHooks,
-  BatchSnapshot,
-  ScheduleResult,
-  JobStatus
-} from "./batchTypes.js";
-import type { BatchSnapshotStore } from "./batchPersistence.ts";
-import { exponentialBackoff, jitter } from "../util/backoff.js";
 import type { MeterRegistry } from "../core/registry.js";
+import {
+  type BatchJobDefinition,
+  type RuntimeJob,
+  type BatchSchedulerOptions,
+  type JobHooks,
+  type BatchSnapshot,
+  type ScheduleResult,
+  type JobStatus
+} from "./batchTypes.js";
+import type { BatchSnapshotStore } from "./batchPersistence.js";
+import { exponentialBackoff, jitter } from "../util/backoff.js";
 
 type InternalOptions = Required<BatchSchedulerOptions> & { tickIntervalMs: number };
 
@@ -20,8 +28,8 @@ export class BatchScheduler {
   private running = new Set<string>();
   private hooks: JobHooks = {};
   private opts: InternalOptions;
-  private interval?: NodeJS.Timeout;
-  private agingTimer?: NodeJS.Timeout;
+  private loop?: NodeJS.Timeout;
+  private agingLoop?: NodeJS.Timeout;
   private stopping = false;
   private store?: BatchSnapshotStore;
   private meter?: MeterRegistry;
@@ -46,23 +54,31 @@ export class BatchScheduler {
       defaultAttemptTimeoutMs: opts.defaultAttemptTimeoutMs ?? 5 * 60_000,
       clock: opts.clock ?? (() => Date.now()),
       priorityComparator: opts.priorityComparator ?? defaultComparator,
-      tickIntervalMs: opts.tickIntervalMs ?? 200 // smaller default for snappier tests
+      tickIntervalMs: opts.tickIntervalMs ?? 75
     };
     this.store = store;
     this.meter = meter;
     if (this.meter) this.initMetrics();
     void this.recover();
-    this.startLoop();
-    this.startAgingLoop();
+    this.startLoops();
   }
 
-  setHooks(h: JobHooks) { this.hooks = h; }
+  setHooks(h: JobHooks) {
+    this.hooks = h || {};
+  }
 
   submit(def: BatchJobDefinition) {
     if (this.jobs.has(def.id)) throw new Error("Job id exists: " + def.id);
     const now = this.opts.clock();
-    const job: RuntimeJob = { def: { ...def, createdAt: now }, status: "queued", attempts: 0, enqueueAt: now };
+    const job: RuntimeJob = {
+      def: { ...def, createdAt: now },
+      status: "queued",
+      attempts: 0,
+      enqueueAt: now
+    };
     this.jobs.set(def.id, job);
+    // Immediate schedule for snappier tests
+    this.scheduleCycle();
     return job;
   }
 
@@ -70,16 +86,22 @@ export class BatchScheduler {
     const j = this.jobs.get(id);
     if (!j) throw new Error("Job not found");
     if (!["failed", "cancelled", "succeeded"].includes(j.status)) throw new Error("Can only requeue terminal job");
-    const newDef = { ...j.def, ...overrides, id: j.def.id };
     const now = this.opts.clock();
-    const job: RuntimeJob = { def: newDef, status: "queued", attempts: 0, enqueueAt: now };
-    this.jobs.set(newDef.id, job);
+    const def = { ...j.def, ...overrides, id: j.def.id };
+    const job: RuntimeJob = {
+      def,
+      status: "queued",
+      attempts: 0,
+      enqueueAt: now
+    };
+    this.jobs.set(def.id, job);
+    this.scheduleCycle();
     return job;
   }
 
   hold(id: string) {
     const j = this.jobs.get(id);
-    if (!j || !["queued", "blocked"].includes(j.status)) throw new Error("Cannot hold job in status " + j?.status);
+    if (!j || !["queued", "blocked"].includes(j.status)) throw new Error("Cannot hold job in status " + (j?.status ?? "unknown"));
     this.transition(j, "held");
   }
 
@@ -87,6 +109,7 @@ export class BatchScheduler {
     const j = this.jobs.get(id);
     if (!j || j.status !== "held") throw new Error("Job not held");
     this.transition(j, "queued");
+    this.scheduleCycle();
   }
 
   cancel(id: string, reason = "cancelled by operator") {
@@ -99,66 +122,70 @@ export class BatchScheduler {
   }
 
   snapshot(): BatchSnapshot {
-    const ts = this.opts.clock();
     const buckets: Record<JobStatus, RuntimeJob[]> = { queued: [], held: [], running: [], succeeded: [], failed: [], cancelled: [], blocked: [] };
     for (const j of this.jobs.values()) buckets[j.status].push(j);
     const perClass: Record<string, { running: number; queued: number; concurrencyLimit?: number }> = {};
     for (const j of this.jobs.values()) {
       const cls = j.def.class ?? "default";
-      const pc = perClass[cls] ?? { running: 0, queued: 0, concurrencyLimit: this.opts.maxPerClass[cls] };
-      if (j.status === "running") pc.running++;
-      if (j.status === "queued") pc.queued++;
-      perClass[cls] = pc;
+      const entry = perClass[cls] ?? { running: 0, queued: 0, concurrencyLimit: this.opts.maxPerClass[cls] };
+      if (j.status === "running") entry.running++;
+      if (j.status === "queued") entry.queued++;
+      perClass[cls] = entry;
     }
-    return { timestamp: ts, running: buckets.running, queued: buckets.queued, held: buckets.held, blocked: buckets.blocked, succeeded: buckets.succeeded, failed: buckets.failed, cancelled: buckets.cancelled, perClass };
+    return {
+      timestamp: this.opts.clock(),
+      ...buckets,
+      perClass
+    };
   }
 
   stop() {
     this.stopping = true;
-    if (this.interval) clearInterval(this.interval);
-    if (this.agingTimer) clearInterval(this.agingTimer);
+    if (this.loop) clearInterval(this.loop);
+    if (this.agingLoop) clearInterval(this.agingLoop);
+  }
+
+  // Test helpers
+  tickOnce(): ScheduleResult {
+    return this.scheduleCycle();
+  }
+  async waitForIdle(timeoutMs = 3000): Promise<void> {
+    const start = Date.now();
+    for (;;) {
+      const snap = this.snapshot();
+      if (!snap.running.length && !snap.queued.length && !snap.blocked.length) return;
+      if (Date.now() - start > timeoutMs) return;
+      await new Promise((r) => setTimeout(r, Math.min(20, this.opts.tickIntervalMs)));
+    }
   }
 
   private initMetrics() {
     this.mStarted = this.meter!.counter("batch_jobs_started_total", "Batch jobs started", ["class"]);
     this.mFailed = this.meter!.counter("batch_jobs_failed_total", "Batch jobs failed", ["class"]);
     this.mSucceeded = this.meter!.counter("batch_jobs_succeeded_total", "Batch jobs succeeded", ["class"]);
-    this.mDuration = this.meter!.histogram("batch_job_duration_seconds", "Batch job run duration seconds", ["class"]);
+    this.mDuration = this.meter!.histogram("batch_job_duration_seconds", "Batch job duration seconds", ["class"]);
   }
 
-  private async recover() {
-    if (!this.store) return;
-    const existing = await this.store.load();
-    for (const j of existing) {
-      if (["queued", "running", "blocked", "held"].includes(j.status)) {
-        j.status = "queued";
-        j.nextEligibleAt = undefined;
-      }
-      this.jobs.set(j.def.id, j);
-    }
-  }
-
-  private startLoop() {
-    this.interval = setInterval(() => {
+  private startLoops() {
+    this.loop = setInterval(() => {
       if (this.stopping) return;
       try {
-        const res = this.scheduleCycle();
-        if (res.started.length) void this.persist();
+        const r = this.scheduleCycle();
+        if (r.started.length) void this.persist();
       } catch (e: any) {
         this.logger.error("batch.schedule.error", { error: e?.message });
       }
     }, this.opts.tickIntervalMs);
-  }
 
-  private startAgingLoop() {
-    this.agingTimer = setInterval(() => {
+    this.agingLoop = setInterval(() => {
       if (this.stopping) return;
       const now = this.opts.clock();
       for (const j of this.jobs.values()) {
         if (j.status !== "queued") continue;
-        const ageSec = (now - j.enqueueAt) / 1000;
         const aging = j.def.agingSeconds ?? 0;
-        if (aging > 0 && ageSec >= aging && j.def.priority < 9) {
+        if (aging <= 0) continue;
+        const ageSec = (now - j.enqueueAt) / 1000;
+        if (ageSec >= aging && j.def.priority < 9) {
           j.def.priority = (j.def.priority + 1) as any;
           j.enqueueAt = now;
           this.logger.warn("batch.priority.aged", { id: j.def.id, newPriority: j.def.priority });
@@ -167,36 +194,34 @@ export class BatchScheduler {
     }, this.opts.agingIntervalMs);
   }
 
-  async persist() { if (this.store) await this.store.save(Array.from(this.jobs.values())); }
-
-  // Test helpers: force a single cycle and drain until idle
-  tickOnce(): ScheduleResult {
-    return this.scheduleCycle();
+  private async recover() {
+    if (!this.store) return;
+    const jobs = await this.store.load();
+    for (const j of jobs) {
+      if (j.status === "running") j.status = "queued";
+      this.jobs.set(j.def.id, j);
+    }
   }
 
-  async drainUntilIdle(timeoutMs = 2000): Promise<void> {
-    const start = Date.now();
-    for (;;) {
-      this.scheduleCycle();
-      if (this.running.size === 0 && this.snapshot().queued.length === 0 && this.snapshot().blocked.length === 0) return;
-      if (Date.now() - start > timeoutMs) return;
-      await new Promise((r) => setTimeout(r, Math.min(20, this.opts.tickIntervalMs)));
-    }
+  private async persist() {
+    if (!this.store) return;
+    await this.store.save(Array.from(this.jobs.values()));
   }
 
   private scheduleCycle(): ScheduleResult {
-    const ready: RuntimeJob[] = [];
     const now = this.opts.clock();
-
+    // Unblock jobs past nextEligibleAt or entering time window
     for (const j of this.jobs.values()) {
-      if (j.status === "queued") {
-        if (!this.isEligible(j, now)) { this.transition(j, "blocked"); continue; }
-        ready.push(j);
-      } else if (j.status === "blocked") {
-        if (this.isEligible(j, now)) this.transition(j, "queued");
-      }
+      if (j.status === "blocked" && this.isEligible(j, now)) this.transition(j, "queued");
     }
 
+    const ready: RuntimeJob[] = [];
+    for (const j of this.jobs.values()) {
+      if (j.status === "queued") {
+        if (this.isEligible(j, now)) ready.push(j);
+        else this.transition(j, "blocked");
+      }
+    }
     ready.sort(this.opts.priorityComparator);
 
     const started: string[] = [];
@@ -204,11 +229,17 @@ export class BatchScheduler {
     const blocked: string[] = [];
 
     for (const job of ready) {
-      if (this.running.size >= this.opts.maxConcurrent) { waiting.push(job.def.id); break; }
-      if (!this.classHasCapacity(job.def.class ?? "default")) { waiting.push(job.def.id); continue; }
-      if (job.def.resourceTags && this.locks) {
-        const conflict = job.def.resourceTags.find((tag) => this.isResourceLocked(tag));
-        if (conflict) { waiting.push(job.def.id); continue; }
+      if (this.running.size >= this.opts.maxConcurrent) {
+        waiting.push(job.def.id);
+        continue;
+      }
+      if (!this.classHasCapacity(job.def.class ?? "default")) {
+        waiting.push(job.def.id);
+        continue;
+      }
+      if (this.isLocked(job)) {
+        waiting.push(job.def.id);
+        continue;
       }
       this.startJob(job);
       started.push(job.def.id);
@@ -219,12 +250,14 @@ export class BatchScheduler {
   }
 
   private isEligible(job: RuntimeJob, now: number): boolean {
+    // dependencies must be succeeded
     if (job.def.dependencies?.length) {
       for (const dep of job.def.dependencies) {
-        const d = this.jobs.get(dep);
-        if (!d || d.status !== "succeeded") return false;
+        const dj = this.jobs.get(dep);
+        if (!dj || dj.status !== "succeeded") return false;
       }
     }
+    // time window
     const tw = job.def.timeWindow;
     if (tw?.start && now < tw.start) return false;
     if (tw?.end && now > tw.end) return false;
@@ -243,9 +276,10 @@ export class BatchScheduler {
     return running < limit;
   }
 
-  private isResourceLocked(tag: string): boolean {
-    if (!this.locks) return false;
-    return this.locks.status().some((l) => l.key === tag && l.remainingMs > 0);
+  private isLocked(job: RuntimeJob): boolean {
+    if (!this.locks || !job.def.resourceTags?.length) return false;
+    const active = this.locks.status();
+    return job.def.resourceTags.some((t) => active.some((l) => l.key === t && l.remainingMs > 0));
   }
 
   private startJob(job: RuntimeJob) {
@@ -257,19 +291,25 @@ export class BatchScheduler {
     this.mStarted?.inc({ class: job.def.class ?? "default" });
 
     const attemptTimeout = job.def.attemptTimeoutMs ?? this.opts.defaultAttemptTimeoutMs;
-    const timer = setTimeout(() => { if (job.status === "running") this.failJob(job, "attempt timeout"); }, attemptTimeout);
+    const timer = setTimeout(() => {
+      if (job.status === "running") this.failJob(job, "attempt timeout");
+    }, attemptTimeout);
 
     Promise.resolve()
       .then(() => this.execute(job))
-      .then(() => { if (job.status === "running") this.succeedJob(job); })
-      .catch((e) => { if (job.status === "running") this.failJob(job, e?.message || "error"); })
+      .then(() => {
+        if (job.status === "running") this.succeedJob(job);
+      })
+      .catch((e) => {
+        if (job.status === "running") this.failJob(job, e?.message || "error");
+      })
       .finally(() => clearTimeout(timer));
   }
 
-  // Hook for domain-specific execution
+  // Domain payload runner
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   protected async execute(job: RuntimeJob): Promise<void> {
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 5));
   }
 
   private succeedJob(job: RuntimeJob) {
@@ -292,13 +332,13 @@ export class BatchScheduler {
     if (job.attempts <= maxRetries) {
       const base = job.def.retryBackoffMs ?? 1000;
       const backoffMs = exponentialBackoff(base, 2, 60_000)(job.attempts);
-      const jittered = backoffMs - (backoffMs * 0.5) + jitter(backoffMs * 0.5);
-      job.nextEligibleAt = this.opts.clock() + jittered;
+      const next = backoffMs - backoffMs * 0.5 + jitter(backoffMs * 0.5);
+      job.nextEligibleAt = this.opts.clock() + next;
       this.transition(job, "queued");
       this.hooks.onFailure?.(job);
     } else {
       this.transition(job, "failed");
-      if (this.mFailed && job.startedAt) this.mFailed.inc({ class: job.def.class ?? "default" });
+      this.mFailed?.inc({ class: job.def.class ?? "default" });
       this.hooks.onFailure?.(job);
       this.hooks.onFinal?.(job);
     }
@@ -311,7 +351,7 @@ export class BatchScheduler {
   }
 }
 
-function defaultComparator(a: RuntimeJob, b: RuntimeJob): number {
+function defaultComparator(a: RuntimeJob, b: RuntimeJob) {
   if (b.def.priority !== a.def.priority) return b.def.priority - a.def.priority;
   return a.enqueueAt - b.enqueueAt;
 }
