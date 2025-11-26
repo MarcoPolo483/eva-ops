@@ -1,0 +1,2 @@
+# EVA Ops ignore rules
+node_modules/.package-lock.json
