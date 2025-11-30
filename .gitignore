@@ -1,2 +1,12 @@
 # EVA Ops ignore rules
 node_modules/.package-lock.json
+
+# EVA Memory System
+.eva-cache/
+!.eva-cache/.gitkeep
+!.eva-cache/reports/.gitkeep
+!.eva-cache/summaries/.gitkeep
+!.eva-cache/backups/.gitkeep
+
+# But DO commit .eva-memory.json
+!.eva-memory.json
