@@ -1,3 +1,3 @@
 # eva-ops
 
-Initial scaffold for Ops Command Center.
+Initial scaffold for EVA module: eva-ops.
