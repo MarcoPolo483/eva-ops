@@ -1,0 +1,41 @@
+{
+  "last_updated": "2025-12-07T18:06:15Z",
+  "owner": "P04-LIB + DevOps",
+  "rules": {
+    "automation_health": {
+      "check_workflows": true,
+      "check_dirty_tree": true,
+      "auto_remediate": false
+    },
+    "quality_gates": {
+      "pre_pr": [
+        "test",
+        "coverage"
+      ],
+      "pre_commit": [
+        "lint",
+        "format-check"
+      ],
+      "pre_push": [
+        "test"
+      ]
+    },
+    "directory_map": {
+      "auto_refresh": true,
+      "max_age_hours": 24,
+      "depth": 3
+    }
+  },
+  "ignored_patterns": [
+    "node_modules/",
+    ".git/",
+    "dist/",
+    "build/",
+    ".next/",
+    ".eva-cache/"
+  ],
+  "pod": "POD-O",
+  "purpose": "Operations tooling and automation",
+  "version": "1.0",
+  "repo": "eva-ops"
+}
