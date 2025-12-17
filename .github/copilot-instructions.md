@@ -42,3 +42,17 @@ For every script, command, or workflow you generate in this repo, you MUST:
 - **Purpose**: Operations tooling and automation
 - **POD**: POD-O
 - **Owner**: P04-LIB + DevOps
+## 📁 Workspace Structure
+
+This repository enforces canonical folder structure via .eva/.eva-workspace.schema.json.
+
+**Validation**: All PRs must pass workspace structure validation (quality-gate.yml).
+
+**Required Folders** (32 total): See .eva/.eva-workspace.schema.json for complete list.
+
+**Rules**:
+- Use workspace-relative paths only (no invented paths)
+- Evidence files must exist in documented locations
+- Empty folders allowed with .gitkeep files
+
+**Validator**: Run `pwsh ../eva-orchestrator/tools/validate-workspace-structure.ps1` to check compliance.
